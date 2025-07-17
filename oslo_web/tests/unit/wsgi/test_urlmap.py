@@ -14,7 +14,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-
+from typing import Any
 from unittest import mock
 
 import webob
@@ -142,14 +142,20 @@ class TestURLMap(base.BaseTestCase):
         self.assertEqual(410, response.status_int)
 
     def test_normalize_url(self):
-        for address, expected in [
+        cases: list[
+            tuple[
+                str | tuple[str, str] | list[str],
+                tuple[str | None, str],
+            ]
+        ] = [
             ('/', (None, '')),
             ('/v1//servers/', (None, '/v1/servers')),
             ('https://example.com:443/v1/', ('example.com:443', '/v1')),
             ('http://example.com', ('example.com', '')),
             (('example.com', '/v1/'), ('example.com', '/v1')),
             (['example.com', '/v1/'], ('example.com', '/v1')),
-        ]:
+        ]
+        for address, expected in cases:
             with self.subTest(address=address):
                 self.assertEqual(expected, self.mapper.normalize_url(address))
         self.assertEqual(
@@ -278,7 +284,7 @@ class TestURLMapFactory(base.BaseTestCase):
         app = webob.Response(text='api')
         loader = mock.Mock()
         loader.get_app.return_value = app
-        global_conf = {}
+        global_conf: dict[str, Any] = {}
         mapper = urlmap.urlmap_factory(
             loader, global_conf, **{'domain example.com /v1': 'api'}
         )

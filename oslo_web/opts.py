@@ -16,7 +16,7 @@ import copy
 
 from oslo_config import cfg
 
-wsgi_opts = [
+wsgi_opts: list[cfg.Opt] = [
     cfg.StrOpt(
         'api_paste_config',
         default='api-paste.ini',
@@ -25,11 +25,11 @@ wsgi_opts = [
 ]
 
 
-def list_wsgi_opts():
+def list_wsgi_opts() -> list[tuple[str | None, list[cfg.Opt]]]:
     """Entry point for oslo-config-generator."""
     return [('oslo_web', copy.deepcopy(wsgi_opts))]
 
 
-def register_wsgi_opts(conf):
+def register_wsgi_opts(conf: cfg.ConfigOpts) -> None:
     """Registers WSGI config options."""
-    return conf.register_opts(wsgi_opts, group='oslo_web')
+    conf.register_opts(wsgi_opts, group='oslo_web')
