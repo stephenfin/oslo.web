@@ -18,12 +18,14 @@ import inspect
 import sys
 from typing import Any, ParamSpec, TypeVar, cast
 
+import microversion_parse
 from oslo_config import cfg
 from oslo_log import log
 from oslo_serialization import jsonutils
 import webob
 import webob.exc
 
+from oslo_web import microversion
 from oslo_web.validation import exceptions
 from oslo_web.validation import validators
 
@@ -44,67 +46,57 @@ def validated(cls: T) -> T:
     return cls
 
 
-class Schemas:
-    """A microversion-aware schema container.
+def _version_range(
+    minimum: microversion_parse.Version | None,
+    maximum: microversion_parse.Version | None,
+) -> microversion_parse.VersionRange | None:
+    if minimum is None and maximum is None:
+        return None
+    return microversion_parse.VersionRange(minimum, maximum)
 
-    Allow definition and retrieval of schemas on a microversion-aware basis.
-    """
+
+class Schemas:
+    """A version-aware schema container with contiguous coverage."""
 
     def __init__(self) -> None:
-        self._schemas: list[tuple[dict[str, object], int, int | None]] = []
+        self._schemas = microversion.VersionedRegistry[dict[str, object]]()
 
     def add_schema(
         self,
         schema: dict[str, object],
-        min_version: int | None,
-        max_version: int | None,
+        min_version: microversion_parse.Version | None,
+        max_version: microversion_parse.Version | None,
     ) -> None:
-        minimum = min_version if min_version is not None else 0
-        if minimum < 0 or (max_version is not None and max_version < minimum):
-            raise ValueError('invalid schema version range')
-
-        previous = self._schemas.copy()
-        self._schemas.append((schema, minimum, max_version))
-        self._schemas.sort(key=lambda x: x[1])
         try:
-            self.validate_schemas()
-        except RuntimeError:
-            self._schemas = previous
-            raise
+            self._schemas.add(schema, min_version, max_version)
+        except microversion.CoverageError as exc:
+            raise RuntimeError(str(exc)) from exc
 
     def validate_schemas(self) -> None:
         """Ensure registered ranges are contiguous and do not overlap."""
-        for previous, current in zip(self._schemas, self._schemas[1:]):
-            previous_max = previous[2]
-            minimum = current[1]
-            if previous_max is None or minimum <= previous_max:
-                raise RuntimeError('overlapping schema coverage')
-            if minimum != previous_max + 1:
-                raise RuntimeError('gaps in schema coverage')
+        try:
+            self._schemas.validate()
+        except microversion.CoverageError as exc:
+            raise RuntimeError(str(exc)) from exc
 
-    def __call__(self, version: int) -> dict[str, object] | None:
-        """Return the schema applicable to an integer API version."""
-        for schema, minimum, maximum in self._schemas:
-            if minimum <= version and (maximum is None or version <= maximum):
-                return schema
-        return None
+    def __call__(
+        self, version: microversion_parse.Version
+    ) -> dict[str, object] | None:
+        """Return the schema applicable to the requested API version."""
+        return self._schemas.get(version)
 
 
 def _matches_version(
-    minimum: int | None,
-    maximum: int | None,
-    version_getter: Callable[..., int] | None,
+    bounds: microversion_parse.VersionRange | None,
+    version_getter: Callable[..., microversion_parse.Version] | None,
     args: tuple[object, ...],
     kwargs: dict[str, Any],
 ) -> bool:
-    if minimum is None and maximum is None:
+    if bounds is None:
         return True
     if version_getter is None:
         raise ValueError('versioned schemas require a version_getter')
-    version = version_getter(*args, **kwargs)
-    return (minimum is None or version >= minimum) and (
-        maximum is None or version <= maximum
-    )
+    return version_getter(*args, **kwargs) in bounds
 
 
 def _schema_validator(
@@ -127,10 +119,10 @@ def _schema_validator(
 
 def request_query_schema(
     schema: dict[str, Any],
-    min_version: int | None = None,
-    max_version: int | None = None,
+    min_version: microversion_parse.Version | None = None,
+    max_version: microversion_parse.Version | None = None,
     *,
-    version_getter: Callable[..., int] | None = None,
+    version_getter: Callable[..., microversion_parse.Version] | None = None,
     query_getter: Callable[..., object] | None = None,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
     """Decorator for registering a request query string schema on API methods.
@@ -142,13 +134,13 @@ def request_query_schema(
     framework's query representation.
 
     :param schema: The JSON Schema schema used to validate the target.
-    :param min_version: An integer indicating the minimum API version
+    :param min_version: A version indicating the minimum API version
         ``schema`` applies against.
-    :param max_version: An integer indicating the maximum API version
+    :param max_version: A version indicating the maximum API version
         ``schema`` applies against.
     :param version_getter: Callback receiving the decorated method's arguments
-        and returning its integer API version. Required for versioned schemas;
-        adapters can translate framework-specific versions here.
+        and returning a microversion_parse.Version. Required for versioned
+        schemas.
     """
 
     if (min_version is not None or max_version is not None) and (
@@ -156,14 +148,14 @@ def request_query_schema(
     ):
         raise ValueError('versioned schemas require a version_getter')
 
+    bounds = _version_range(min_version, max_version)
+
     def add_validator(func: Callable[P, R]) -> Callable[P, R]:
         signature = inspect.signature(func)
 
         @functools.wraps(func)
         def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
-            if not _matches_version(
-                min_version, max_version, version_getter, args, kwargs
-            ):
+            if not _matches_version(bounds, version_getter, args, kwargs):
                 return func(*args, **kwargs)
             try:
                 if query_getter is not None:
@@ -204,10 +196,10 @@ def request_query_schema(
 
 def request_body_schema(
     schema: dict[str, Any],
-    min_version: int | None = None,
-    max_version: int | None = None,
+    min_version: microversion_parse.Version | None = None,
+    max_version: microversion_parse.Version | None = None,
     *,
-    version_getter: Callable[..., int] | None = None,
+    version_getter: Callable[..., microversion_parse.Version] | None = None,
     body_getter: Callable[..., object] | None = None,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
     """Decorator for registering a request body schema on API methods.
@@ -218,13 +210,13 @@ def request_body_schema(
     the method arguments and extract a different framework's body.
 
     :param schema: The JSON Schema schema used to validate the target.
-    :param min_version: An integer indicating the minimum API version
+    :param min_version: A version indicating the minimum API version
         ``schema`` applies against.
-    :param max_version: An integer indicating the maximum API version
+    :param max_version: A version indicating the maximum API version
         ``schema`` applies against.
     :param version_getter: Callback receiving the decorated method's arguments
-        and returning its integer API version. Required for versioned schemas;
-        adapters can translate framework-specific versions here.
+        and returning a microversion_parse.Version. Required for versioned
+        schemas.
     """
 
     if (min_version is not None or max_version is not None) and (
@@ -232,14 +224,14 @@ def request_body_schema(
     ):
         raise ValueError('versioned schemas require a version_getter')
 
+    bounds = _version_range(min_version, max_version)
+
     def add_validator(func: Callable[P, R]) -> Callable[P, R]:
         signature = inspect.signature(func)
 
         @functools.wraps(func)
         def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
-            if not _matches_version(
-                min_version, max_version, version_getter, args, kwargs
-            ):
+            if not _matches_version(bounds, version_getter, args, kwargs):
                 return func(*args, **kwargs)
             if body_getter is not None:
                 body = body_getter(*args, **kwargs)
@@ -305,10 +297,10 @@ def _response_body(response: object) -> object:
 
 def response_body_schema(
     schema: dict[str, Any],
-    min_version: int | None = None,
-    max_version: int | None = None,
+    min_version: microversion_parse.Version | None = None,
+    max_version: microversion_parse.Version | None = None,
     *,
-    version_getter: Callable[..., int] | None = None,
+    version_getter: Callable[..., microversion_parse.Version] | None = None,
     response_getter: Callable[[R], object] | None = None,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
     """Decorator for registering a response body schema on API methods.
@@ -321,19 +313,21 @@ def response_body_schema(
     and extracts a representation for other response types.
 
     :param schema: The JSON Schema schema used to validate the target.
-    :param min_version: An integer indicating the minimum API version
+    :param min_version: A version indicating the minimum API version
         ``schema`` applies against.
-    :param max_version: An integer indicating the maximum API version
+    :param max_version: A version indicating the maximum API version
         ``schema`` applies against.
     :param version_getter: Callback receiving the decorated method's arguments
-        and returning its integer API version. Required for versioned schemas;
-        adapters can translate framework-specific versions here.
+        and returning a microversion_parse.Version. Required for versioned
+        schemas.
     """
 
     if (min_version is not None or max_version is not None) and (
         version_getter is None
     ):
         raise ValueError('versioned schemas require a version_getter')
+
+    bounds = _version_range(min_version, max_version)
 
     def add_validator(func: Callable[P, R]) -> Callable[P, R]:
         @functools.wraps(func)
@@ -345,9 +339,7 @@ def response_body_schema(
                 # schema errors
                 return response
 
-            if not _matches_version(
-                min_version, max_version, version_getter, args, kwargs
-            ):
+            if not _matches_version(bounds, version_getter, args, kwargs):
                 return response
 
             try:
