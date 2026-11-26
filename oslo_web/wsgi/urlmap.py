@@ -186,15 +186,10 @@ class URLMap(abc.MutableMapping):
 
         def key(app_desc):
             (domain, url), _app = app_desc
-            if not domain:
-                # Make sure empty domains sort last:
-                return '\xff', -len(url)
-            else:
-                return domain, -len(url)
+            # Make sure empty domains sort last and break length ties by URL.
+            return domain or '\xff', -len(url), url
 
-        apps = [(key(desc), desc) for desc in self.applications]
-        apps.sort()
-        self.applications = [desc for (sortable, desc) in apps]
+        self.applications.sort(key=key)
 
     def __setitem__(self, url, app):
         if app is None:
@@ -230,8 +225,9 @@ class URLMap(abc.MutableMapping):
             raise KeyError(f'No application with the url {url!r}')
 
     def keys(self):
-        """Return the normalized mapping keys in routing order."""
-        return [app_url for app_url, app in self.applications]
+        """Return a live view of normalized keys in routing order."""
+        # Supply a local docstring: the inherited one confuses Sphinx.
+        return super().keys()
 
     def __call__(self, environ, start_response):
         host = environ.get('HTTP_HOST', environ.get('SERVER_NAME')).lower()

@@ -163,7 +163,7 @@ class TestURLMap(base.BaseTestCase):
         self.mapper['/v1/'] = echo_app
         self.assertEqual(1, len(self.mapper))
         self.assertEqual([(None, '/v1')], list(self.mapper))
-        self.assertEqual([(None, '/v1')], self.mapper.keys())
+        self.assertEqual([(None, '/v1')], list(self.mapper.keys()))
         self.assertIs(echo_app, self.mapper['/v1'])
         self.assertIn('/v1', self.mapper)
         replacement = webob.Response(text='replacement')
@@ -172,6 +172,48 @@ class TestURLMap(base.BaseTestCase):
         self.assertIs(replacement, self.mapper.get('/v1/'))
         del self.mapper['/v1']
         self.assertEqual(0, len(self.mapper))
+
+    def test_application_order(self):
+        for path in (
+            '/',
+            '/v2',
+            '/v2.1',
+            '/bbb',
+            '/aaa',
+            'http://example.org/',
+            'http://example.com/',
+            'http://example.com/v2',
+            'http://example.com/v2.1',
+        ):
+            self.mapper[path] = mock.sentinel.app
+
+        self.assertEqual(
+            [
+                ('example.com', '/v2.1'),
+                ('example.com', '/v2'),
+                ('example.com', ''),
+                ('example.org', ''),
+                (None, '/v2.1'),
+                (None, '/aaa'),
+                (None, '/bbb'),
+                (None, '/v2'),
+                (None, ''),
+            ],
+            list(self.mapper),
+        )
+
+    def test_keys_view(self):
+        self.mapper['/'] = mock.sentinel.root_app
+        keys = self.mapper.keys()
+        self.mapper['/v2/'] = mock.sentinel.version_app
+
+        self.assertEqual([(None, '/v2'), (None, '')], list(keys))
+        self.assertIn((None, '/v2'), keys)
+        self.assertIs(mock.sentinel.version_app, self.mapper['/v2'])
+
+        del self.mapper['/v2']
+
+        self.assertEqual([(None, '')], list(keys))
 
     def test_missing_keys(self):
         for key in ('', '/', '/missing', (None, '/missing')):

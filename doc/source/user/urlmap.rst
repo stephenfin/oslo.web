@@ -35,6 +35,8 @@ available, including the attributes and methods used by existing service
 subclasses. The legacy `paste.urlmap_object` WSGI environment key is retained.
 
 404 responses use WebOb rather than Paste, so their representation can differ.
-Paste's `PathProxyURLMap` wrapper is not included.
+Paste's `PathProxyURLMap` wrapper is not included. Unlike Paste, ``keys()``
+returns a live mapping view rather than a snapshot list; use
+``list(mapper.keys())`` when a list is required.
 
 See :doc:`/reference/urlmap` for the API reference.
