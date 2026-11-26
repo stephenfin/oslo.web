@@ -24,6 +24,7 @@ import webob
 from oslo_web.tests import base
 from oslo_web.wsgi import exceptions
 from oslo_web.wsgi import loader
+from oslo_web.wsgi import urlmap
 
 CONF = cfg.CONF
 
@@ -61,6 +62,15 @@ class TestLoaderNormalFilesystem(base.BaseTestCase):
 [app:test_app]
 use = call:oslo_web.tests.unit.wsgi.test_loader:app_factory
 message = Hello from oslo.web
+
+[composite:main]
+use = call:oslo_web.wsgi.urlmap:urlmap_factory
+/v1 = test_app
+not_found_app = missing
+
+[app:missing]
+use = call:oslo_web.tests.unit.wsgi.test_loader:app_factory
+message = No matching application
     """
 
     def setUp(self):
@@ -86,6 +96,15 @@ message = Hello from oslo.web
             self.loader.load_app,
             'nonexistent app',
         )
+
+    def test_urlmap(self):
+        app = self.loader.load_app('main')
+        self.assertIsInstance(app, urlmap.URLMap)
+        response = webob.Request.blank('/v1/servers').get_response(app)
+        self.assertEqual(200, response.status_int)
+        self.assertEqual('Hello from oslo.web', response.text)
+        response = webob.Request.blank('/v2').get_response(app)
+        self.assertEqual('No matching application', response.text)
 
     def test_app_found(self):
         app = self.loader.load_app('test_app')
