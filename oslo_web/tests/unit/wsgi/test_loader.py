@@ -19,12 +19,17 @@ import tempfile
 from unittest import mock
 
 from oslo_config import cfg
+import webob
 
 from oslo_web.tests import base
 from oslo_web.wsgi import exceptions
 from oslo_web.wsgi import loader
 
 CONF = cfg.CONF
+
+
+def app_factory(global_conf, **local_conf):
+    return webob.Response(text=local_conf['message'])
 
 
 class TestLoaderNothingExists(base.BaseTestCase):
@@ -54,8 +59,8 @@ class TestLoaderNormalFilesystem(base.BaseTestCase):
 
     _paste_config = """
 [app:test_app]
-use = egg:Paste#static
-document_root = /tmp
+use = call:oslo_web.tests.unit.wsgi.test_loader:app_factory
+message = Hello from oslo.web
     """
 
     def setUp(self):
@@ -83,5 +88,7 @@ document_root = /tmp
         )
 
     def test_app_found(self):
-        url_parser = self.loader.load_app('test_app')
-        self.assertEqual('/tmp', url_parser.directory)
+        app = self.loader.load_app('test_app')
+        response = webob.Request.blank('/').get_response(app)
+        self.assertEqual(200, response.status_int)
+        self.assertEqual('Hello from oslo.web', response.text)
