@@ -17,6 +17,8 @@
 # extensions coming with Sphinx (named 'sphinx.ext.*') or your custom ones.
 extensions = [
     'openstackdocstheme',
+    'oslo_config.sphinxext',
+    'sphinx.ext.autodoc',
 ]
 
 # openstackdocstheme options

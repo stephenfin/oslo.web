@@ -5,6 +5,15 @@ oslo.web -- Common WSGI/ASGI utilities for OpenStack Services
 oslo.web provides a set of reusable utilities for the WSGI and ASGI frameworks
 used across multiple OpenStack services.
 
+Documentation
+-------------
+
+.. toctree::
+   :maxdepth: 2
+
+   user/index
+   reference/index
+
 Release Notes
 -------------
 
