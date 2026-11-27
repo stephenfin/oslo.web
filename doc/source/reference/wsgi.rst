@@ -32,6 +32,15 @@ Action metadata
 
 .. autofunction:: oslo_web.wsgi.actions.collect_actions
 
+Controller decorators
+---------------------
+
+.. autofunction:: oslo_web.wsgi.decorators.api_version
+
+.. autofunction:: oslo_web.wsgi.decorators.response
+
+.. autoclass:: oslo_web.wsgi.decorators.ResponseCodes
+
 Loader exceptions
 -----------------
 

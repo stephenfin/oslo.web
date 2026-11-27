@@ -21,6 +21,7 @@ import webob.dec
 import webob.exc
 
 from oslo_web.wsgi import actions
+from oslo_web.wsgi import decorators
 
 
 class Resource:
@@ -28,8 +29,10 @@ class Resource:
 
     Controller methods receive ``req`` and route keyword arguments. POST,
     PUT, and PATCH methods also receive a deserialized ``body`` argument.
-    Return a JSON-serializable value, ``None`` for an empty HTTP 200 response,
+    Return a JSON-serializable value, ``None`` for an empty response,
     or a WebOb response for explicit status, headers, or streaming content.
+    Generated responses default to HTTP 200 unless the method is decorated
+    with :func:`oslo_web.wsgi.decorators.response`.
 
     Override the individual pipeline methods to implement service conventions.
     This class supplies neither version negotiation nor policy checks,
@@ -54,6 +57,10 @@ class Resource:
             action_args.update(body_arguments)
             result = self.dispatch(method, request, action_args)
             response = self.serialize(request, result, content_type)
+            if not isinstance(result, webob.Response):
+                status = self.get_response_status(request, method)
+                if status is not None:
+                    response.status_int = status
         except Exception as error:
             response = self.handle_exception(request, error)
         # Finalize both successful responses and handled errors. Failures in
@@ -176,6 +183,24 @@ class Resource:
     ) -> object:
         """Invoke the controller; implementation errors are not HTTP 400s."""
         return method(req=request, **action_args)
+
+    def get_response_status(
+        self, request: webob.Request, method: Callable[..., object]
+    ) -> int | None:
+        """Select a default status, or leave serialization unchanged.
+
+        Called only for controller results other than explicit WebOb responses.
+        Select version-dependent metadata using its request version getter.
+        Override for service conventions. The status is applied after
+        serialization and before finalisation.
+        """
+        codes = getattr(method, 'wsgi_codes', None)
+        if isinstance(codes, decorators.ResponseCodes):
+            return codes(request)
+        code = getattr(method, 'wsgi_code', None)
+        if isinstance(code, int) and not isinstance(code, bool):
+            return code
+        return None
 
     def serialize(
         self, request: webob.Request, result: object, content_type: str

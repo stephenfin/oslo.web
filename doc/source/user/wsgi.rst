@@ -147,6 +147,8 @@ The pipeline provides the following override points, in execution order:
   ``get_action_name(request, body)`` for body-action fallback.
 * ``dispatch(method, request, action_args)`` for controller invocation.
 * ``serialize(request, result, content_type)`` for response construction.
+* ``get_response_status(request, method)`` for an optional default status on
+  generated responses, applied after serialization.
 * ``process_response(request, response)`` for response finalisation.
 
 ``handle_exception(request, error)`` handles errors from preparation through
@@ -160,6 +162,183 @@ Response finalisation runs for successful responses and handled errors.
 Exceptions from finalisation itself propagate without re-entering error
 handling. Errors raised while iterating a streaming response occur outside the
 pipeline and must be handled by the server or outer middleware.
+
+Response status metadata
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+Use :func:`~oslo_web.wsgi.decorators.response` to declare a method's default
+HTTP status without wrapping the method:
+
+.. code-block:: python
+
+    from http import HTTPStatus
+
+    from oslo_web.wsgi import decorators
+
+    class Controller:
+        @decorators.response(HTTPStatus.CREATED)
+        def create(self, req, body):
+            return {'item': body}
+
+        @decorators.response(HTTPStatus.NO_CONTENT)
+        def delete(self, req, id):
+            pass
+
+The decorator stores callable ``wsgi_codes`` metadata on the unchanged
+function. A version-independent declaration also exposes ``wsgi_code`` for
+simple adapters. It accepts integer HTTP codes from 100 to 599, including
+``HTTPStatus`` members, but not booleans. Invalid codes raise ``ValueError``
+when decorating the method. Repeated version-independent declarations are
+rejected as overlapping coverage.
+
+The selected method's status applies to JSON values and ``None`` results.
+Undecorated methods retain the serializer's status (normally HTTP 200).
+Explicitly returned WebOb responses, including streaming responses and HTTP
+exceptions, retain their own status and headers. Raised exceptions also keep
+the normal error-handling behavior. WebOb handles HEAD requests according to
+its usual WSGI semantics. Return ``None`` for bodyless statuses such as HTTP
+204; the decorator changes the status, not the serialized body.
+
+Inherited methods retain their status metadata. An undecorated override does
+not inherit the overridden method's metadata; a decorated override supplies
+its own. The decorator works with ``@actions.action`` in either order.
+
+``get_response_status(request, method)`` returns the selected method's code,
+or ``None`` to leave serialization unchanged. It is called only for results
+other than explicit WebOb responses. The code is applied after ``serialize``
+and before ``process_response``, without changing the serializer hook's
+signature. Adapters overriding serialization should override this hook too if
+their serializer's status must take precedence over method metadata.
+
+For version-dependent statuses, stack declarations over adjoining inclusive
+ranges while retaining a single controller implementation:
+
+.. code-block:: python
+
+    import microversion_parse
+
+    def response_version(req):
+        return req.environ['compute.microversion']
+
+    class Controller:
+        @decorators.response(
+            204,
+            min_version=microversion_parse.Version(2, 20),
+            version_getter=response_version,
+        )
+        @decorators.response(
+            202,
+            max_version=microversion_parse.Version(2, 19),
+            version_getter=response_version,
+        )
+        def delete(self, req, id):
+            pass
+
+Unlike the ``api_version`` getter, this getter receives **only the WebOb
+request**: status selection happens after controller invocation. All bounded
+status declarations on a method must use the same getter callable. No getter
+is required or called for a version-independent declaration.
+
+The metadata uses :class:`~oslo_web.microversion.VersionedRegistry` directly.
+Every registration must preserve contiguous, non-overlapping coverage:
+
+* Bounds are ``microversion_parse.Version`` objects, not strings or integers.
+* Successive ranges must meet at consecutive minor versions of the same major
+  API version. Register adjoining ranges in ascending or descending order.
+* Overlaps (including shared endpoints), gaps, and mixed version-independent
+  and versioned declarations raise ``CoverageError`` at decoration time.
+* Omitted bounds are open within the other bound's major version. No coverage
+  outside the registered bounds is required.
+
+If a negotiated version falls outside the registered coverage, response
+construction raises HTTP 500 through the normal error/finalisation pipeline.
+This indicates missing status configuration, not method unavailability; use
+``@api_version`` to guard availability. Invalid getter values or getter errors
+propagate. Explicit WebOb responses and raised exceptions bypass selection,
+so their status does not depend on registered coverage.
+
+Registrations are atomic and extending a wrapper's copied metadata does not
+mutate the wrapped function's declarations. The decorator works in either
+order with ``@api_version`` and ``@actions.action``.
+
+Set dynamic headers on an explicit WebOb response or in ``process_response``;
+there is no generic header decorator.
+
+Version-gated methods
+~~~~~~~~~~~~~~~~~~~~~
+
+:func:`~oslo_web.wsgi.decorators.api_version` guards a single implementation
+of a controller method. It checks availability when called, including direct
+Python calls outside ``Resource``, and raises HTTP 404 outside its inclusive
+version range. Services should normally provide a small wrapper to bind their
+version getter and preferred bound syntax once, rather than repeating them on
+every controller method:
+
+.. code-block:: python
+
+    import microversion_parse
+
+    from oslo_web.wsgi import actions
+    from oslo_web.wsgi import decorators
+
+    def negotiated_version(controller, req, **kwargs):
+        return req.environ['compute.microversion']
+
+    # In the service's shared WSGI module:
+    def api_version(min_version=None, max_version=None):
+        return decorators.api_version(
+            microversion_parse.parse_version_string(min_version)
+            if min_version is not None else None,
+            microversion_parse.parse_version_string(max_version)
+            if max_version is not None else None,
+            version_getter=negotiated_version,
+        )
+
+    # Controllers import and use the service's decorator:
+    class Controller:
+        @api_version('2.17')
+        @decorators.response(202)
+        @actions.action('trigger_crash_dump')
+        def _trigger_crash_dump(self, req, id, body):
+            pass
+
+The getter receives exactly the decorated method's original arguments,
+including ``self`` for an instance method. It should accept the controller's
+positional and keyword calling conventions and any route/body arguments.
+Here it reads the value set by ``microversion_parse.middleware`` for the
+``compute`` service. Other adapters can read their own negotiated version
+representation and convert it to ``microversion_parse.Version``.
+
+The library's ``min_version`` and ``max_version`` parameters accept
+``microversion_parse.Version`` objects, not strings or integers. The service
+wrapper above converts convenient string bounds such as ``'2.17'`` before
+calling the library decorator. It also accepts two bounds, for example
+``@api_version('2.17', '2.30')``.
+
+Bounds use inclusive ``VersionRange``
+semantics: a missing bound is open within the supplied bound's major version.
+Invalid or reversed ranges and cross-major ranges fail when decorating the
+method. A getter is required if either bound is supplied; without bounds, the
+method is unrestricted and the getter is not called.
+
+The decorator preserves the signature and existing metadata using
+``functools.wraps``, exposing ``min_version``, ``max_version``, and
+``wsgi_version_range`` metadata. It works in either order with the action and
+response decorators. Inheritance follows ordinary Python method lookup: an
+inherited method retains its guard, while an undecorated override does not.
+Out-of-range calls do not enter the method. Through ``Resource``, they use the
+normal exception-handling and response-finalisation hooks, without acquiring
+the method's success status.
+
+Missing negotiated versions, invalid getter return values, and getter errors
+are configuration/implementation errors: they propagate rather than being
+silently converted to HTTP 404. This decorator does not negotiate versions,
+parse request headers, or impose the service's globally supported range.
+
+There is no alternate-implementation registry, metaclass, or dispatcher.
+Repeated ``@api_version`` declarations on a method are rejected. Define one
+implementation and put version-dependent behavior inside it; legacy services'
+dispatcher-style decorators are intentionally not supported.
 
 Body actions
 ~~~~~~~~~~~~
@@ -214,8 +393,8 @@ controller base class or metaclass is required. Override ``resolve_method`` to
 change fallback rules, or ``get_action_name`` for a different action envelope.
 
 This is not yet a drop-in replacement for service resource frameworks. API
-version negotiation, context/project checks, policy, versioned methods,
-status/header decorators, and legacy extension processing are not supplied.
+version negotiation, context/project checks, policy, and legacy extension
+processing are not supplied.
 Adapters can implement service rules through these hooks. There is no
 service-specific request cache, exception mapping, or context lookup.
 
