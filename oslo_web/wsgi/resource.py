@@ -20,6 +20,8 @@ import webob
 import webob.dec
 import webob.exc
 
+from oslo_web.wsgi import actions
+
 
 class Resource:
     """Dispatch Routes arguments to a controller using plain WebOb objects.
@@ -30,14 +32,15 @@ class Resource:
     or a WebOb response for explicit status, headers, or streaming content.
 
     Override the individual pipeline methods to implement service conventions.
-    This class supplies neither version negotiation nor policy checks, action
-    decorators, legacy extension processing, or a service-specific fault body.
+    This class supplies neither version negotiation nor policy checks,
+    legacy extension processing, or a service-specific fault body.
     """
 
     body_methods = frozenset({'POST', 'PUT', 'PATCH'})
 
     def __init__(self, controller: object) -> None:
         self.controller = controller
+        self.actions = actions.collect_actions(type(controller))
 
     @webob.dec.wsgify(RequestClass=webob.Request)
     def __call__(self, request: webob.Request) -> webob.Response:
@@ -46,8 +49,9 @@ class Resource:
             action_args = self.get_action_args(request.environ)
             action = action_args.pop('action', None)
             content_type = self.negotiate_content_type(request)
-            method = self.get_method(request, action)
-            action_args.update(self.get_body_arguments(request))
+            body_arguments = self.get_body_arguments(request)
+            method = self.resolve_method(request, action, body_arguments)
+            action_args.update(body_arguments)
             result = self.dispatch(method, request, action_args)
             response = self.serialize(request, result, content_type)
         except Exception as error:
@@ -84,7 +88,7 @@ class Resource:
     ) -> Callable[..., object]:
         """Find a public controller method, or raise HTTP 404.
 
-        Override for action-body dispatch or version-dependent method lookup.
+        Override for version-dependent or service-specific method lookup.
         """
         if not isinstance(action, str) or action.startswith('_'):
             raise webob.exc.HTTPNotFound()
@@ -92,6 +96,48 @@ class Resource:
         if not callable(method):
             raise webob.exc.HTTPNotFound()
         return cast(Callable[..., object], method)
+
+    def resolve_method(
+        self,
+        request: webob.Request,
+        action: object,
+        body_arguments: Mapping[str, object],
+    ) -> Callable[..., object]:
+        """Prefer a routed method, falling back to registered body actions.
+
+        Only a route targeting ``action`` can use body-action fallback, and
+        only when the controller has registered actions. The decoded body is
+        shared with dispatch rather than deserialized a second time.
+        """
+        try:
+            return self.get_method(request, action)
+        except webob.exc.HTTPNotFound:
+            if action != 'action' or not self.actions:
+                raise
+        name = self.get_action_name(request, body_arguments.get('body'))
+        method_name = self.actions.get(name)
+        if method_name is None:
+            raise webob.exc.HTTPBadRequest(explanation='Unknown body action')
+        # Explicit registration allows private implementation method names.
+        method = getattr(self.controller, method_name)
+        if not callable(method):
+            raise webob.exc.HTTPNotFound()
+        return cast(Callable[..., object], method)
+
+    def get_action_name(self, request: webob.Request, body: object) -> str:
+        """Extract the sole key of a JSON object, or raise HTTP 400.
+
+        Override for alternative action envelopes. The handler receives the
+        full body unchanged, not just the selected action's value.
+        """
+        if not isinstance(body, dict) or len(body) != 1:
+            raise webob.exc.HTTPBadRequest(
+                explanation='Action body must be an object with one key'
+            )
+        name = next(iter(body))
+        if not isinstance(name, str):
+            raise webob.exc.HTTPBadRequest(explanation='Invalid action name')
+        return name
 
     def get_body_arguments(self, request: webob.Request) -> dict[str, object]:
         """Extract body arguments only for ``body_methods``.

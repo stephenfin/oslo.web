@@ -25,6 +25,13 @@ Resource
    :members:
    :special-members: __init__, __call__
 
+Action metadata
+---------------
+
+.. autofunction:: oslo_web.wsgi.actions.action
+
+.. autofunction:: oslo_web.wsgi.actions.collect_actions
+
 Loader exceptions
 -----------------
 

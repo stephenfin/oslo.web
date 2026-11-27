@@ -140,9 +140,11 @@ The pipeline provides the following override points, in execution order:
 * ``process_request(request)`` for request preparation.
 * ``get_action_args(environ)`` for route argument extraction.
 * ``negotiate_content_type(request)`` for response media type selection.
-* ``get_method(request, action)`` for controller method selection.
 * ``get_body_arguments(request)``, using ``get_body(request)`` and
   ``deserialize(request, body)``, for request body arguments.
+* ``resolve_method(request, action, body_arguments)`` for method selection,
+  using ``get_method(request, action)`` for routed methods and
+  ``get_action_name(request, body)`` for body-action fallback.
 * ``dispatch(method, request, action_args)`` for controller invocation.
 * ``serialize(request, result, content_type)`` for response construction.
 * ``process_response(request, response)`` for response finalisation.
@@ -159,10 +161,62 @@ Exceptions from finalisation itself propagate without re-entering error
 handling. Errors raised while iterating a streaming response occur outside the
 pipeline and must be handled by the server or outer middleware.
 
+Body actions
+~~~~~~~~~~~~
+
+Register named body actions on ordinary controller instance methods with
+:func:`~oslo_web.wsgi.actions.action`:
+
+.. code-block:: python
+
+    from oslo_web.wsgi import actions
+
+    class Controller:
+        @actions.action('restart')
+        def _restart(self, req, id, body):
+            return webob.Response(status=202)
+
+    items = resource.Resource(Controller())
+    mapper.connect(
+        'item-action',
+        '/items/{id}/action',
+        controller=items,
+        action='action',
+        conditions={'method': ['POST']},
+    )
+
+A POST body such as ``{"restart": {"force": true}}`` selects ``_restart``.
+The handler receives the complete decoded body, including the ``restart`` key,
+plus the normal request and route arguments. The body is deserialized once.
+Registered actions may use private implementation method names; such methods
+remain inaccessible through direct route lookup.
+
+Body-action lookup is a fallback only for routes targeting ``action``. An
+explicit public controller method named ``action`` takes precedence. A
+controller without registered body actions returns HTTP 404 if it has no such
+method. When fallback is enabled, an empty body, a non-object body, an object
+with other than one key, or an unknown action name returns HTTP 400. Malformed
+JSON and unsupported media types retain the pipeline's HTTP 400/415 handling.
+Restrict the route to POST in the mapper if other HTTP methods are not allowed.
+
+The decorator attaches ``wsgi_action`` metadata without wrapping the method.
+:func:`~oslo_web.wsgi.actions.collect_actions` collects a fresh mapping from
+action names to effective method names, following Python's method resolution
+order without evaluating properties. Inherited actions remain available unless
+their methods are overridden. An undecorated override removes an action;
+redecorating the override replaces its action name. Duplicate action names on
+distinct effective methods are rejected with ``ValueError`` when constructing
+the resource, rather than silently selecting an arbitrary handler.
+
+``Resource.actions`` holds this metadata snapshot for each resource. Controller
+classes should be fully defined before constructing their resources. No
+controller base class or metaclass is required. Override ``resolve_method`` to
+change fallback rules, or ``get_action_name`` for a different action envelope.
+
 This is not yet a drop-in replacement for service resource frameworks. API
-version negotiation, context/project checks, policy, action-body metadata,
-versioned methods, decorators, and legacy extension processing are not
-supplied. Adapters can implement service rules through these hooks. There is no
+version negotiation, context/project checks, policy, versioned methods,
+status/header decorators, and legacy extension processing are not supplied.
+Adapters can implement service rules through these hooks. There is no
 service-specific request cache, exception mapping, or context lookup.
 
 See :doc:`/reference/wsgi` for the API reference.
