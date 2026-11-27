@@ -18,6 +18,13 @@ Router
    :members:
    :special-members: __init__, __call__
 
+Resource
+--------
+
+.. autoclass:: oslo_web.wsgi.resource.Resource
+   :members:
+   :special-members: __init__, __call__
+
 Loader exceptions
 -----------------
 

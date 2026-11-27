@@ -79,6 +79,90 @@ An unmatched route returns HTTP 404. Matched route arguments are available in
 ``request.environ['wsgiorg.routing_args'][1]``. The router selects a WSGI
 application; it does not itself dispatch controller methods based on an
 ``action`` argument, deserialize request bodies, or serialize return values.
-Those responsibilities remain with the consuming application.
+Use a resource to add controller dispatch, or supply another WSGI application.
+
+Controller resources
+--------------------
+
+:class:`~oslo_web.wsgi.resource.Resource` adds a small controller pipeline to
+Routes dispatch. Requests and responses are ordinary WebOb objects; no custom
+request subclass or response wrapper is required:
+
+.. code-block:: python
+
+    from oslo_web.wsgi import resource
+
+    class Controller:
+        def show(self, req, id):
+            return {'item': {'id': id}}
+
+        def create(self, req, body):
+            return webob.Response(json_body=body, status=201)
+
+    items = resource.Resource(Controller())
+    mapper = routes.Mapper()
+    mapper.connect(
+        'show',
+        '/items/{id}',
+        controller=items,
+        action='show',
+        conditions={'method': ['GET']}
+    )
+    mapper.connect(
+        'create',
+        '/items',
+        controller=items,
+        action='create',
+        conditions={'method': ['POST']}
+    )
+    application = router.Router(mapper)
+
+The resource copies route arguments, removes ``controller``, ``format``, and
+``action``, and passes the remaining arguments to the selected public method
+alongside ``req``. A missing or non-callable method returns HTTP 404.
+
+By default, POST, PUT, and PATCH requests receive a ``body`` argument. Empty
+bodies become ``None``; nonempty bodies are decoded as UTF-8 JSON. Missing
+Content-Type defaults to JSON, while an explicit non-JSON type on a nonempty
+body returns HTTP 415. Malformed JSON returns HTTP 400. Other HTTP methods do
+not read or deserialize the body. Accept negotiation selects
+``application/json`` and returns HTTP 406 if it is excluded.
+
+JSON-serializable return values are encoded as JSON with status 200. ``None``
+returns an empty body with status 200, not 204. Return a ``webob.Response`` to
+control status, headers, or content type. Existing responses pass through
+without inspecting or consuming their body iterators, including binary and
+streaming responses. The default Accept check still applies before dispatch;
+override negotiation for resources serving other media types.
+
+The pipeline provides the following override points, in execution order:
+
+* ``process_request(request)`` for request preparation.
+* ``get_action_args(environ)`` for route argument extraction.
+* ``negotiate_content_type(request)`` for response media type selection.
+* ``get_method(request, action)`` for controller method selection.
+* ``get_body_arguments(request)``, using ``get_body(request)`` and
+  ``deserialize(request, body)``, for request body arguments.
+* ``dispatch(method, request, action_args)`` for controller invocation.
+* ``serialize(request, result, content_type)`` for response construction.
+* ``process_response(request, response)`` for response finalisation.
+
+``handle_exception(request, error)`` handles errors from preparation through
+serialization. By default, WebOb HTTP response exceptions pass through, using
+WebOb's fault representation; unexpected errors propagate to outer middleware.
+In particular, controller ``TypeError`` exceptions are not silently converted
+into client errors. Override this hook to translate service exceptions or
+render service-specific fault envelopes.
+
+Response finalisation runs for successful responses and handled errors.
+Exceptions from finalisation itself propagate without re-entering error
+handling. Errors raised while iterating a streaming response occur outside the
+pipeline and must be handled by the server or outer middleware.
+
+This is not yet a drop-in replacement for service resource frameworks. API
+version negotiation, context/project checks, policy, action-body metadata,
+versioned methods, decorators, and legacy extension processing are not
+supplied. Adapters can implement service rules through these hooks. There is no
+service-specific request cache, exception mapping, or context lookup.
 
 See :doc:`/reference/wsgi` for the API reference.
